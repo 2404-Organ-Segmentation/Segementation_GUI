@@ -44,7 +44,8 @@ class SegmentationApp(QMainWindow):
     def select_model(self, index):
         # Slot for handling model selection
         model_name = self.comboBox_model.itemText(index)
-        print("Selected model:", model_name)
+        if model_name == "UNETR" or model_name == "SWIN-UNETR":
+            self.textEdit_run.append("Model selected: " + model_name)
 
     def run_segmentation(self):
         # Slot for running the segmentation process

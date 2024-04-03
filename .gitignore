@@ -161,4 +161,4 @@ cython_debug/
 
 gui/
 src/uploads/*
-!src/uploads/
+!src/uploads/.gitkeep
