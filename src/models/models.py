@@ -40,12 +40,18 @@ UNETR_transforms = Compose(
         CropForegroundd(keys=["image"], source_key="image"),
     ]
 )
-# TODO: Add transforms that were used for swinunetr model training
+
+# TODO: Add transforms that were used for swinunetr model validation
+SwinUNETR_transforms = Compose(
+    [
+
+    ]
+)
 
 
 class ParentModel:
 
-    def __init__(self, model, model_path: str, data_folder: str, debug: bool = False) -> None:
+    def __init__(self, model, transforms, model_path: str, data_folder: str, debug: bool = False) -> None:
         """! Parent constructor for model prediction. Defines the model type that is used as well as the paths for
         loading the pretrained model, loading and saving the data
         @:param model: The model that is going to be used for predictions. Should be monai UNETR or SwinUNETR.
@@ -57,6 +63,7 @@ class ParentModel:
         """
         self.val_loader = None
         self.debug_mode = debug
+        self.transforms = transforms
 
         pretrained_pth = model_path
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,55 +77,59 @@ class ParentModel:
         self.model.load_state_dict(torch.load(pretrained_pth))
         self.model.eval()
 
-    def test_output(self, output_folder: str = None) -> None:
+    def inference(self, output_folder) -> None:
         """! Runs the prediction on the files located under self.data_folder, will save the files as Nifti (.nii.gz)
         format under output_folder. If output_folder is not specified, then it will be saved to the folder where the
         data was originally taken from.
-        @:param output_path: The folder path to save the nifti images as a string. If None, then it will save to the
+
+        @:param output_folder: The folder path to save the nifti images as a string. If None, then it will save to the
         folder where the data files are located. (self.data_folder)
         @:return None
         """
 
         counter = 0
-        if output_folder is None:
-            output_folder = self.data_folder
-
         with torch.no_grad():
-            for i in self.val_loader:
-                # Obtain the name for the file and append -segmented to it
-                file_name = re.sub(r"\.nii\.gz$", "-segmented.nii.gz", self.files[counter])
+            for i, test_data in enumerate(self.val_loader):
+                # Make prediction
+                img = test_data["image"].to(self.device)
+                test_data["pred"] = sliding_window_inference(img, (96, 96, 96), 4, self.model, overlap=0.8)
 
-                # Need information about the original image to find a location in space
-                img = i["image"][0]
-                original_image = nib.load(self.file_dicts[0]["image"])
-                header = original_image.header
+                # Post-processing transforms
+                # Source: https://github.com/MASILab/3DUX-Net/tree/14ea46b7b4c4980b46aba066aaaa24b1d9c1bb0d
+                post_transforms = Compose([
+                    EnsureTyped(keys="pred"),
+                    Activationsd(keys="pred", softmax=True),
+                    Invertd(
+                        keys="pred",  # invert the `pred` data field, also support multiple fields
+                        transform=UNETR_transforms,
+                        orig_keys="image",
+                        # get the previously applied pre_transforms information on the `img` data field,
+                        # then invert `pred` based on this information. we can use same info
+                        # for multiple fields, also support different orig_keys for different fields
+                        meta_keys="pred_meta_dict",  # key field to save inverted meta data, every item maps to `keys`
+                        orig_meta_keys="image_meta_dict",
+                        # get the meta data from `img_meta_dict` field when inverting,
+                        # for example, may need the `affine` to invert `Spacingd` transform,
+                        # multiple fields can use the same meta data to invert
+                        meta_key_postfix="meta_dict",
+                        # if `meta_keys=None`, use "{keys}_{meta_key_postfix}" as the meta key,
+                        # if `orig_meta_keys=None`, use "{orig_keys}_{meta_key_postfix}",
+                        # otherwise, no need this arg during inverting
+                        nearest_interp=False,
+                        # don't change the interpolation mode to "nearest" when inverting transforms
+                        # to ensure a smooth output, then execute `AsDiscreted` transform
+                        to_tensor=True,  # convert to PyTorch Tensor after inverting
+                    ),
+                    AsDiscreted(keys="pred", argmax=True),
+                    KeepLargestConnectedComponentd(keys='pred', applied_labels=[1, 3]),
+                    SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_folder,
+                               output_postfix="temp", output_ext=".nii.gz", resample=True, separate_folder=False),
+                ])
+                test_data = [post_transforms(j) for j in decollate_batch(test_data)]
 
-                val_inputs = torch.unsqueeze(img, 1).cuda()
-                _, _, h, w, d = val_inputs.shape
-                target_shape = (h, w, d)
-                val_outputs = sliding_window_inference(val_inputs, (96, 96, 96), 4, self.model, overlap=0.8)
-                original_affine = val_outputs.affine
-                original_shape = val_outputs.shape
-
-                # Sets the size of voxels and location with respect to origin
-                # TODO: Make the offset adjustable as a parameter since I cannot figure out how to centre the image
-                offset = (original_image.shape[1] - original_shape[3]) * original_image.affine[1, 1]
-                original_affine[:3, 3] = torch.tensor([original_shape[2] / -1 * original_affine[0, 0], original_shape[3] / -1 * original_affine[1, 1] + offset, 0], dtype=torch.float64)
-                original_affine[1, 1] = -1 * original_affine[1, 1]
-
-                # Post-processing + saving
-                val_outputs = torch.softmax(val_outputs, 1).cpu().numpy()
-                val_outputs = np.argmax(val_outputs, axis=1).astype(np.uint8)[0]
-                val_outputs = self.resample_3d(val_outputs, target_shape)
-                nib.save(
-                    nib.Nifti1Image(val_outputs, affine=original_affine, header=header),
-                    os.path.join(output_folder, file_name)
-                )
-
+                # Small modification to affine matrix
+                self.__load_and_translate(output_folder=output_folder, file_name=self.files[counter])
                 counter += 1
-                self.debug(f"offset is {offset}")
-                self.debug(f"affine is {original_affine}")
-                self.debug(f"shape is {original_shape}")
 
     def load_dataset(self) -> None:
         """! Loads and preprocesses the data specified in under self.data_folder. Will save the data as a Monai
@@ -164,21 +175,37 @@ class ParentModel:
             print(message)
         return None
 
-    @staticmethod
-    def resample_3d(img, target_size):
-        """! Helper function that resizes the voxels for the output segmentation image. This will zoom the image to be the
-        same size as the input dimensions.
+    def __load_and_translate(self, output_folder, file_name) -> None:
+        """! Helper function that loads the saved file from monai and applies the necessary affine matrix modifications
+        to it, then deletes the temporary monai file and saves as the proper nifti file.
 
-        @:param img: The image that is being resized, should be a 3 dimensional image.
-        @:param target_size: The size that the image needs to be.
-
-        @:return img_resampled: The image that has been zoomed to the appropriate size.
+        @:param output_folder: The path to the folder that contains the temporary monai saved file.
+        @:param file_name: The name of the file that was being analyzed.
+        @:return None
         """
-        imx, imy, imz = img.shape
-        tx, ty, tz = target_size
-        zoom_ratio = (float(tx) / float(imx), float(ty) / float(imy), float(tz) / float(imz))
-        img_resampled = ndimage.zoom(img, zoom_ratio, order=0, prefilter=False)
-        return img_resampled
+        temp_name = re.sub(r"\.nii\.gz$", "_temp.nii.gz", file_name)
+        temp_file_path = os.path.join(output_folder, temp_name)
+        seg_img = nib.load(temp_file_path)
+        self.__debug(f"segm affine is {seg_img.affine}")
+        self.__debug(f"segm shape is {seg_img.shape}")
+
+        new_affine = seg_img.affine
+        new_affine[:3, 3] = [0, 0, 0]
+        new_affine[1, 1] = -1 * new_affine[1, 1]
+        self.__debug(f"New affine is {new_affine}")
+
+        new_name = re.sub(r"\.nii\.gz$", "-segmented.nii.gz", file_name)
+
+        nib.save(
+            nib.Nifti1Image(seg_img.get_fdata(), affine=new_affine),
+            os.path.join(output_folder, new_name)
+        )
+
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            self.__debug(f"File '{temp_file_path}' deleted successfully")
+        else:
+            self.__debug(f"File '{temp_file_path}' does not exist")
 
 
 class UnetRModel(ParentModel):
@@ -210,7 +237,8 @@ class UnetRModel(ParentModel):
             res_block=True,
             dropout_rate=0.0,
         )
-        super().__init__(model=unetr_model, model_path=model_path, data_folder=data_folder, debug=debug)
+        super().__init__(model=unetr_model, transforms=UNETR_transforms, model_path=model_path,
+                         data_folder=data_folder, debug=debug)
 
 
 class SwinUnetRModel(ParentModel):
@@ -236,11 +264,12 @@ class SwinUnetRModel(ParentModel):
             feature_size=48,
             use_checkpoint=True,
         )
-        super().__init__(model=swin_unetr_model, model_path=model_path, data_folder=data_folder, debug=debug)
+        super().__init__(model=swin_unetr_model, transforms=SwinUNETR_transforms, model_path=model_path,
+                         data_folder=data_folder, debug=debug)
 
 
 if __name__ == "__main__":
     # Only run this file directly for debugging
     trainer = UnetRModel(model_path="./best_metric_model_3dUNETR52200.pth",
                          data_folder="./testing", debug=True)
-    trainer.test_output(output_folder="./testing")
+    trainer.inference(output_folder="./testing")
