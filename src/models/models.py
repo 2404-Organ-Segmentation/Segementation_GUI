@@ -22,6 +22,12 @@ from monai.transforms import (
     Orientationd,
     ScaleIntensityRanged,
     Spacingd,
+    EnsureTyped,
+    Activationsd,
+    Invertd,
+    AsDiscreted,
+    KeepLargestConnectedComponentd,
+    SaveImaged,
 )
 from monai.inferers import sliding_window_inference
 from monai.networks.nets import SwinUNETR, UNETR
@@ -66,14 +72,14 @@ class ParentModel:
         self.transforms = transforms
 
         pretrained_pth = model_path
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.file_dicts = []
         self.files = []
         self.data_folder = data_folder
-        self.load_dataset()
+        self.__load_dataset()
 
         self.model = model
-        self.model.to(device)
+        self.model.to(self.device)
         self.model.load_state_dict(torch.load(pretrained_pth))
         self.model.eval()
 
@@ -125,19 +131,19 @@ class ParentModel:
                     SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_folder,
                                output_postfix="temp", output_ext=".nii.gz", resample=True, separate_folder=False),
                 ])
-                test_data = [post_transforms(j) for j in decollate_batch(test_data)]
+                test_data = [post_transforms(j) for j in data.decollate_batch(test_data)]
 
                 # Small modification to affine matrix
                 self.__load_and_translate(output_folder=output_folder, file_name=self.files[counter])
                 counter += 1
 
-    def load_dataset(self) -> None:
+    def __load_dataset(self) -> None:
         """! Loads and preprocesses the data specified in under self.data_folder. Will save the data as a Monai
         Dataloader and apply the relevant transforms that were used for training.
         @:return None
         """
 
-        self.load_files_from_folder()
+        self.__load_files_from_folder()
         test_dataset = data.Dataset(data=self.file_dicts, transform=UNETR_transforms)
         self.val_loader = data.DataLoader(
             test_dataset,
@@ -147,7 +153,7 @@ class ParentModel:
             pin_memory=True,
         )
 
-    def load_files_from_folder(self) -> None:
+    def __load_files_from_folder(self) -> None:
         """! Loads the files into a list of dictionaries to be read by Monai's built in dataset. This needs to be
         formatted in this specific way so the transforms can be properly applied (the transforms are expecting specific
         keys). The files that are loaded are all the files in the folder specified by self.data_folder. This is a mock
@@ -166,7 +172,7 @@ class ParentModel:
                 self.files.append(file)
                 self.file_dicts.append(image_dict)
 
-    def debug(self, message: str) -> None:
+    def __debug(self, message: str) -> None:
         """! Debug print statements, allows debug messages to be sent if self.debug_mode is True.
         @:param message: The message that is sent
         @:return None
@@ -270,6 +276,6 @@ class SwinUnetRModel(ParentModel):
 
 if __name__ == "__main__":
     # Only run this file directly for debugging
-    trainer = UnetRModel(model_path="./best_metric_model_3dUNETR52200.pth",
+    trainer = UnetRModel(model_path="./pretrained_models/best_metric_model_3dUNETR52200.pth",
                          data_folder="./testing", debug=True)
     trainer.inference(output_folder="./testing")
