@@ -1,5 +1,5 @@
 # Segementation_GUI
-GUI program for using trained segmentation models.
+Proof of concept GUI program for using trained segmentation models.
 
 ## Usage
 Run the command `python setup.py install` from the corresponding directory to install packages \
