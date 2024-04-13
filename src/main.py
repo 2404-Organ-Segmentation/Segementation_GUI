@@ -1,14 +1,13 @@
 import sys
 import os
-import shutil
 import requests
 from PyQt5.QtWidgets import *
 from PyQt5.uic import loadUi
 from PyQt5.QtCore import QCoreApplication, Qt
 
-from .models import UnetRModel, SwinUnetRModel
 
-host = "http://127.0.0.1:5000"
+# Set the host URL for the API
+host = ''
 
 class SegmentationApp(QMainWindow):
     def __init__(self):
@@ -98,7 +97,6 @@ class SegmentationApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     app.setAttribute(Qt.AA_EnableHighDpiScaling)
     app.setAttribute(Qt.AA_UseHighDpiPixmaps)
 

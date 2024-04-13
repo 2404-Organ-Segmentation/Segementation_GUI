@@ -1,6 +1,3 @@
-# app.py
-
-import sys
 from src.main import main
 
 def app():
